@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# ==============================================
+# 强制 read 命令从终端读取，以兼容 curl | bash 管道执行
+# ==============================================
+exec </dev/tty
+
 if [ "$EUID" -ne 0 ]; then 
   echo "请使用 root 权限运行此脚本"
   exit 1
@@ -83,4 +88,3 @@ if [[ "$show_logs" =~ ^[Yy](es)?$ ]]; then
 else
   echo "跳过日志查看。"
 fi
-SCRIPT_EOF

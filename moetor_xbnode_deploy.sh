@@ -6,7 +6,6 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 输入面板 URL，带默认值
 read -p "请输入面板 URL [默认: https://dash.tors.moe]: " PANEL_URL
 PANEL_URL="${PANEL_URL:-https://dash.tors.moe}"
 echo "使用面板 URL: $PANEL_URL"
@@ -23,7 +22,6 @@ if [ -z "$NODE_ID" ]; then
   exit 1
 fi
 
-# 检查并安装 Docker
 if ! command -v docker &> /dev/null; then
   echo "Docker 未安装，正在安装..."
   curl -sSL https://get.docker.com | bash
@@ -35,7 +33,6 @@ else
   systemctl start docker 2>/dev/null
 fi
 
-# 检查并安装 git
 if ! command -v git &> /dev/null; then
   echo "git 未安装，正在安装..."
   apt-get update && apt-get install -y git
@@ -43,7 +40,6 @@ else
   echo "git 已安装"
 fi
 
-# 处理旧目录
 if [ -d "xboard-node" ]; then
   echo "检测到已存在的 xboard-node 目录。"
   read -p "是否删除并重新部署？(y/n) " confirm
@@ -87,3 +83,4 @@ if [[ "$show_logs" =~ ^[Yy](es)?$ ]]; then
 else
   echo "跳过日志查看。"
 fi
+SCRIPT_EOF

@@ -1,27 +1,22 @@
 #!/bin/bash
 set -e
 
-# ==============================================
-# 强制 read 命令从终端读取，以兼容 curl | bash 管道执行
-# ==============================================
-exec </dev/tty
-
 if [ "$EUID" -ne 0 ]; then 
   echo "请使用 root 权限运行此脚本"
   exit 1
 fi
 
-read -p "请输入面板 URL [默认: https://dash.tors.moe]: " PANEL_URL
+read -p "请输入面板 URL [默认: https://dash.tors.moe]: " PANEL_URL < /dev/tty
 PANEL_URL="${PANEL_URL:-https://dash.tors.moe}"
 echo "使用面板 URL: $PANEL_URL"
 
-read -p "请输入面板 Token: " PANEL_TOKEN
+read -p "请输入面板 Token: " PANEL_TOKEN < /dev/tty
 if [ -z "$PANEL_TOKEN" ]; then
   echo "Token 不能为空"
   exit 1
 fi
 
-read -p "请输入节点 ID (node_id): " NODE_ID
+read -p "请输入节点 ID (node_id): " NODE_ID < /dev/tty
 if [ -z "$NODE_ID" ]; then
   echo "节点 ID 不能为空"
   exit 1
@@ -47,7 +42,7 @@ fi
 
 if [ -d "xboard-node" ]; then
   echo "检测到已存在的 xboard-node 目录。"
-  read -p "是否删除并重新部署？(y/n) " confirm
+  read -p "是否删除并重新部署？(y/n) " confirm < /dev/tty
   if [[ "$confirm" =~ ^[Yy](es)?$ ]]; then
     echo "正在删除旧目录..."
     rm -rf xboard-node
@@ -79,7 +74,7 @@ echo "============================================"
 echo "部署完成！"
 echo "============================================"
 
-read -p "是否查看容器日志？(y/n) " show_logs
+read -p "是否查看容器日志？(y/n) " show_logs < /dev/tty
 if [[ "$show_logs" =~ ^[Yy](es)?$ ]]; then
   echo "等待容器初始化..."
   sleep 5

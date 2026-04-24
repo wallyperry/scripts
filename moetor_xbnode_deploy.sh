@@ -124,10 +124,7 @@ echo "============================================" >&2
 
 safe_read '是否查看容器日志？(y/n) ' show_logs 'n'
 if [[ "$show_logs" =~ ^[Yy](es)?$ ]]; then
-  echo "等待容器初始化..." >&2
-  sleep 5
-  docker compose logs --tail 50
-  echo "提示：如需持续查看日志，请执行: docker compose logs -f" >&2
+  docker compose logs -f
 else
   echo "跳过日志查看。" >&2
 fi

@@ -73,39 +73,6 @@ install_pkg() {
     fi
 }
 
-get_dns_ip() {
-    local name="$1"
-    local type="$2"
-    
-    echo "正在查询DNS记录: $name ($type)" >&2
-    
-    if command -v dig >/dev/null 2>&1; then
-        local ip=$(dig +short "$name" "$type" | head -1)
-        if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
-            echo "通过dig获取到DNS IP: $ip" >&2
-            echo "$ip"
-            return
-        fi
-    fi
-    
-    if command -v nslookup >/dev/null 2>&1; then
-        local ip
-        if [ "$type" = "A" ]; then
-            ip=$(nslookup "$name" 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}')
-        else
-            ip=$(nslookup -type=AAAA "$name" 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}')
-        fi
-        if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
-            echo "通过nslookup获取到DNS IP: $ip" >&2
-            echo "$ip"
-            return
-        fi
-    fi
-    
-    echo "DNS查询失败，记录可能不存在" >&2
-    echo ""
-}
-
 get_public_ip() {
     local type="$1"
     local apis=()
@@ -195,19 +162,6 @@ else
     record_name="$SUBDOMAIN.$DOMAIN"
 fi
 
-DNS_IP=$(get_dns_ip "$record_name" "$DNS_TYPE")
-
-if [ -n "$DNS_IP" ]; then
-    if [ "$CURRENT_IP" == "$DNS_IP" ]; then
-        echo "出口 IP 与 DNS 一致，无需更新 ($CURRENT_IP)"
-        exit 0
-    else
-        echo "IP不一致，需要更新: DNS=$DNS_IP, 当前=$CURRENT_IP"
-    fi
-else
-    echo "DNS记录不存在或查询失败，将创建新记录"
-fi
-
 echo "正在获取Cloudflare Zone ID..."
 zone_json=$(cf_api_call "GET" "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN")
 
@@ -230,22 +184,31 @@ ZONE_ID=$(echo "$zone_json" | jq -r '.result[0].id')
 [ -z "$ZONE_ID" ] || [ "$ZONE_ID" == "null" ] && echo "无法获取 Zone ID" && exit 1
 echo "Zone ID: $ZONE_ID"
 
-echo "正在查询现有DNS记录..."
+echo "正在查询现有DNS记录（通过Cloudflare API，无缓存）..."
 record_json=$(cf_api_call "GET" "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$record_name&type=$RECORD_TYPE")
 RECORD_ID=$(echo "$record_json" | jq -r '.result[0].id')
+DNS_IP=$(echo "$record_json" | jq -r '.result[0].content')
 
-if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" == "null" ]; then
-    echo "记录不存在，创建中..."
-    response=$(cf_api_call "POST" "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
-        "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":60,\"proxied\":false}")
+# 对比IP
+if [ -n "$RECORD_ID" ] && [ "$RECORD_ID" != "null" ]; then
+    echo "DNS记录存在，当前值: $DNS_IP"
+    if [ "$CURRENT_IP" == "$DNS_IP" ]; then
+        echo "✅ IP未变化，无需更新"
+        exit 0
+    else
+        echo "⚠️ IP已变化: $DNS_IP -> $CURRENT_IP"
+        echo "正在更新DNS记录..."
+        response=$(cf_api_call "PUT" "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
+            "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":60,\"proxied\":false}")
+    fi
 else
-    echo "记录存在，Record ID: $RECORD_ID，更新中..."
-    response=$(cf_api_call "PUT" "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
+    echo "DNS记录不存在，创建新记录..."
+    response=$(cf_api_call "POST" "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
         "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":60,\"proxied\":false}")
 fi
 
-echo "$response" | grep -q '"success":true' && echo "更新成功: $record_name -> $CURRENT_IP" || {
-    echo "更新失败"
+echo "$response" | grep -q '"success":true' && echo "✅ 更新成功: $record_name -> $CURRENT_IP" || {
+    echo "❌ 更新失败"
     echo "$response"
     exit 1
 }

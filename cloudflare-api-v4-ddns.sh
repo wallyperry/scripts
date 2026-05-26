@@ -94,17 +94,68 @@ get_dns_ip() {
     echo ""
 }
 
+# 获取公网IP的函数
+get_public_ip() {
+    local type="$1"
+    local apis=()
+    
+    if [ "$type" = "A" ]; then
+        # IPv4 API列表（直接返回纯IP文本）
+        apis=(
+            "https://api.ipify.org"
+            "https://ipv4.icanhazip.com"
+            "https://ifconfig.me"
+            "https://v4.ipgg.cn/ip"
+        )
+    else
+        # IPv6 API列表
+        apis=(
+            "https://api6.ipify.org"
+            "https://ipv6.icanhazip.com"
+            "https://ifconfig.me"
+            "https://v6.ipgg.cn/ip"
+        )
+    fi
+    
+    for api in "${apis[@]}"; do
+        echo "尝试从 $api 获取IP..." >&2
+        local response=$(curl -s --max-time 10 "$api")
+        
+        # 如果返回的是JSON格式，尝试提取.ip字段
+        if echo "$response" | jq -e . >/dev/null 2>&1; then
+            local ip=$(echo "$response" | jq -r '.ip // empty')
+            if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
+                echo "成功获取IP: $ip" >&2
+                echo "$ip"
+                return 0
+            fi
+        fi
+        
+        # 直接是纯IP文本
+        if [[ "$response" =~ ^[0-9a-fA-F\.:]+$ ]]; then
+            echo "成功获取IP: $response" >&2
+            echo "$response"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
 need_cmd curl
 need_cmd jq
 
 case "$RECORD_TYPE" in
-    A)    IP_API_URL="https://v4.ipgg.cn/ip"; DNS_TYPE="A" ;;
-    AAAA) IP_API_URL="https://v6.ipgg.cn/ip"; DNS_TYPE="AAAA" ;;
+    A) DNS_TYPE="A" ;;
+    AAAA) DNS_TYPE="AAAA" ;;
 esac
 
 echo "正在获取当前出口IP..."
-CURRENT_IP=$(curl -s --max-time 10 "$IP_API_URL" | jq -r '.ip')
-[[ ! "$CURRENT_IP" =~ ^[0-9a-fA-F\.:]+$ ]] && echo "获取出口 IP 失败: $CURRENT_IP" && exit 1
+CURRENT_IP=$(get_public_ip "$RECORD_TYPE")
+if [ $? -ne 0 ] || [ -z "$CURRENT_IP" ]; then
+    echo "获取出口 IP 失败，请检查网络连接"
+    exit 1
+fi
 echo "当前出口IP: $CURRENT_IP"
 
 # 处理子域名，如果 SUBDOMAIN 为 @ 则直接使用域名

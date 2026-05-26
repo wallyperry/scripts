@@ -1,27 +1,32 @@
 #!/bin/bash
 
-# 使用说明
 usage() {
     cat <<EOF
-使用方法: $0 -k <API_TOKEN> -d <DOMAIN> -s <SUBDOMAIN> -t <RECORD_TYPE>
+使用方法: 
+  API Token方式:  $0 -k <API_TOKEN> -d <DOMAIN> -s <SUBDOMAIN> -t <RECORD_TYPE>
+  Global Key方式: $0 -e <EMAIL> -g <GLOBAL_KEY> -d <DOMAIN> -s <SUBDOMAIN> -t <RECORD_TYPE>
 
 参数说明:
-  -k    Cloudflare API Token（必填）
+  -k    Cloudflare API Token（推荐）
+  -e    Cloudflare 账户邮箱（使用Global Key时必填）
+  -g    Cloudflare Global API Key（使用Global Key时必填）
   -d    主域名，如 example.com（必填）
   -s    子域名，如 www 或 @（必填）
   -t    DNS记录类型，A 或 AAAA（必填）
 
 示例:
-  $0 -k "your-api-token" -d "example.com" -s "home" -t "A"
-  $0 -k "your-api-token" -d "example.com" -s "@" -t "AAAA"
+  $0 -k "v1.0-xxxx" -d "example.com" -s "home" -t "A"
+  $0 -e "user@example.com" -g "9775cd3e..." -d "example.com" -s "home" -t "A"
 EOF
     exit 1
 }
 
-# 解析命令行参数
-while getopts "k:d:s:t:h" opt; do
+# 解析参数
+while getopts "k:e:g:d:s:t:h" opt; do
     case $opt in
         k) CF_API_TOKEN="$OPTARG" ;;
+        e) CF_EMAIL="$OPTARG" ;;
+        g) CF_GLOBAL_KEY="$OPTARG" ;;
         d) DOMAIN="$OPTARG" ;;
         s) SUBDOMAIN="$OPTARG" ;;
         t) RECORD_TYPE="$OPTARG" ;;
@@ -30,13 +35,20 @@ while getopts "k:d:s:t:h" opt; do
     esac
 done
 
-# 检查必填参数
-[ -z "$CF_API_TOKEN" ] && echo "错误: -k API_TOKEN 不能为空" && usage
+# 检查认证方式
+if [ -n "$CF_API_TOKEN" ]; then
+    AUTH_TYPE="token"
+elif [ -n "$CF_EMAIL" ] && [ -n "$CF_GLOBAL_KEY" ]; then
+    AUTH_TYPE="global"
+else
+    echo "错误: 必须提供 -k (API Token) 或 -e + -g (邮箱+Global Key)"
+    usage
+fi
+
 [ -z "$DOMAIN" ] && echo "错误: -d DOMAIN 不能为空" && usage
 [ -z "$SUBDOMAIN" ] && echo "错误: -s SUBDOMAIN 不能为空" && usage
 [ -z "$RECORD_TYPE" ] && echo "错误: -t RECORD_TYPE 不能为空" && usage
 
-# 验证 RECORD_TYPE
 case "$RECORD_TYPE" in
     A|AAAA) ;;
     *) echo "错误: RECORD_TYPE 必须为 A 或 AAAA" && exit 1 ;;
@@ -94,7 +106,6 @@ get_dns_ip() {
     echo ""
 }
 
-# 获取公网IP的函数
 get_public_ip() {
     local type="$1"
     local apis=()
@@ -104,14 +115,14 @@ get_public_ip() {
             "https://v4.ipgg.cn/ip"
             "https://api.ipify.org"
             "https://ipv4.icanhazip.com"
-            "https://ifconfig.me"
+            "https://ifconfig.me/ip"
         )
     else
         apis=(
             "https://v6.ipgg.cn/ip"
             "https://api6.ipify.org"
             "https://ipv6.icanhazip.com"
-            "https://ifconfig.me"
+            "https://ifconfig.me/ip"
         )
     fi
     
@@ -119,7 +130,6 @@ get_public_ip() {
         echo "尝试从 $api 获取IP..." >&2
         local ip=$(curl -s --max-time 10 "$api" | tr -d '[:space:]')
         
-        # 验证是否为有效IP格式
         if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
             echo "成功获取IP: $ip" >&2
             echo "$ip"
@@ -130,7 +140,41 @@ get_public_ip() {
     return 1
 }
 
+# 执行Cloudflare API请求的函数
+cf_api_call() {
+    local method="$1"
+    local url="$2"
+    local data="$3"
+    
+    if [ "$AUTH_TYPE" = "token" ]; then
+        if [ -n "$data" ]; then
+            curl -s -X "$method" "$url" \
+                -H "Authorization: Bearer $CF_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "$data"
+        else
+            curl -s -X "$method" "$url" \
+                -H "Authorization: Bearer $CF_API_TOKEN" \
+                -H "Content-Type: application/json"
+        fi
+    else
+        if [ -n "$data" ]; then
+            curl -s -X "$method" "$url" \
+                -H "X-Auth-Email: $CF_EMAIL" \
+                -H "X-Auth-Key: $CF_GLOBAL_KEY" \
+                -H "Content-Type: application/json" \
+                --data "$data"
+        else
+            curl -s -X "$method" "$url" \
+                -H "X-Auth-Email: $CF_EMAIL" \
+                -H "X-Auth-Key: $CF_GLOBAL_KEY" \
+                -H "Content-Type: application/json"
+        fi
+    fi
+}
+
 need_cmd curl
+need_cmd jq
 
 case "$RECORD_TYPE" in
     A) DNS_TYPE="A" ;;
@@ -145,7 +189,6 @@ if [ $? -ne 0 ] || [ -z "$CURRENT_IP" ]; then
 fi
 echo "当前出口IP: $CURRENT_IP"
 
-# 处理子域名，如果 SUBDOMAIN 为 @ 则直接使用域名
 if [ "$SUBDOMAIN" = "@" ]; then
     record_name="$DOMAIN"
 else
@@ -166,27 +209,39 @@ else
 fi
 
 echo "正在获取Cloudflare Zone ID..."
-zone_json=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
-    -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
+zone_json=$(cf_api_call "GET" "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN")
+
+# 检查API响应
+success=$(echo "$zone_json" | jq -r '.success')
+if [ "$success" != "true" ]; then
+    echo "Cloudflare API 返回错误:"
+    echo "$zone_json" | jq -r '.errors[]?.message'
+    exit 1
+fi
+
+result_count=$(echo "$zone_json" | jq -r '.result | length')
+if [ "$result_count" -eq 0 ]; then
+    echo "未找到域名 $DOMAIN"
+    echo "请检查: 1)域名已添加到Cloudflare 2)API权限正确"
+    exit 1
+fi
+
 ZONE_ID=$(echo "$zone_json" | jq -r '.result[0].id')
 [ -z "$ZONE_ID" ] || [ "$ZONE_ID" == "null" ] && echo "无法获取 Zone ID" && exit 1
 echo "Zone ID: $ZONE_ID"
 
 echo "正在查询现有DNS记录..."
-record_json=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$record_name&type=$RECORD_TYPE" \
-    -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
+record_json=$(cf_api_call "GET" "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$record_name&type=$RECORD_TYPE")
 RECORD_ID=$(echo "$record_json" | jq -r '.result[0].id')
 
 if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" == "null" ]; then
     echo "记录不存在，创建中..."
-    response=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
-        -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
-        --data "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":600,\"proxied\":false}")
+    response=$(cf_api_call "POST" "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
+        "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":600,\"proxied\":false}")
 else
     echo "记录存在，Record ID: $RECORD_ID，更新中..."
-    response=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
-        -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
-        --data "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":600,\"proxied\":false}")
+    response=$(cf_api_call "PUT" "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
+        "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":600,\"proxied\":false}")
 fi
 
 echo "$response" | grep -q '"success":true' && echo "更新成功: $record_name -> $CURRENT_IP" || {

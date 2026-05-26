@@ -100,41 +100,29 @@ get_public_ip() {
     local apis=()
     
     if [ "$type" = "A" ]; then
-        # IPv4 API列表（直接返回纯IP文本）
         apis=(
+            "https://v4.ipgg.cn/ip"
             "https://api.ipify.org"
             "https://ipv4.icanhazip.com"
             "https://ifconfig.me"
-            "https://v4.ipgg.cn/ip"
         )
     else
-        # IPv6 API列表
         apis=(
+            "https://v6.ipgg.cn/ip"
             "https://api6.ipify.org"
             "https://ipv6.icanhazip.com"
             "https://ifconfig.me"
-            "https://v6.ipgg.cn/ip"
         )
     fi
     
     for api in "${apis[@]}"; do
         echo "尝试从 $api 获取IP..." >&2
-        local response=$(curl -s --max-time 10 "$api")
+        local ip=$(curl -s --max-time 10 "$api" | tr -d '[:space:]')
         
-        # 如果返回的是JSON格式，尝试提取.ip字段
-        if echo "$response" | jq -e . >/dev/null 2>&1; then
-            local ip=$(echo "$response" | jq -r '.ip // empty')
-            if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
-                echo "成功获取IP: $ip" >&2
-                echo "$ip"
-                return 0
-            fi
-        fi
-        
-        # 直接是纯IP文本
-        if [[ "$response" =~ ^[0-9a-fA-F\.:]+$ ]]; then
-            echo "成功获取IP: $response" >&2
-            echo "$response"
+        # 验证是否为有效IP格式
+        if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
+            echo "成功获取IP: $ip" >&2
+            echo "$ip"
             return 0
         fi
     done
@@ -143,7 +131,6 @@ get_public_ip() {
 }
 
 need_cmd curl
-need_cmd jq
 
 case "$RECORD_TYPE" in
     A) DNS_TYPE="A" ;;

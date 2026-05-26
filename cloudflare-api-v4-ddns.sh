@@ -1,137 +1,158 @@
-#!/usr/bin/env bash
-set -o errexit
-set -o nounset
-set -o pipefail
+#!/bin/bash
 
-# Automatically update your CloudFlare DNS record to the IP, Dynamic DNS
-# Can retrieve cloudflare Domain id and list zone's, because, lazy
+# 使用说明
+usage() {
+    cat <<EOF
+使用方法: $0 -k <API_TOKEN> -d <DOMAIN> -s <SUBDOMAIN> -t <RECORD_TYPE>
 
-# Place at:
-# curl https://raw.githubusercontent.com/aipeach/cloudflare-api-v4-ddns/dev/cf-v4-ddns.sh > /usr/local/bin/cf-ddns.sh && chmod +x /usr/local/bin/cf-ddns.sh
-# run `crontab -e` and add next line:
-# */1 * * * * /usr/local/bin/cf-ddns.sh >/dev/null 2>&1
-# or you need log:
-# */1 * * * * /usr/local/bin/cf-ddns.sh >> /var/log/cf-ddns.log 2>&1
+参数说明:
+  -k    Cloudflare API Token（必填）
+  -d    主域名，如 example.com（必填）
+  -s    子域名，如 www 或 @（必填）
+  -t    DNS记录类型，A 或 AAAA（必填）
 
+示例:
+  $0 -k "your-api-token" -d "example.com" -s "home" -t "A"
+  $0 -k "your-api-token" -d "example.com" -s "@" -t "AAAA"
+EOF
+    exit 1
+}
 
-# Usage:
-# cf-ddns.sh -k cloudflare-api-key \
-#            -h host.example.com \     # fqdn of the record you want to update
-#            -z example.com \          # will show you all zones if forgot, but you need this
-#            -t A|AAAA                 # specify ipv4/ipv6, default: ipv4
-
-# Optional flags:
-#            -f false|true \           # force dns update, disregard local stored ip
-
-# default config
-
-# API key, see https://dash.cloudflare.com/profile/api-tokens,
-# incorrect api-key results in E_UNAUTH error
-CFKEY=9775cd3e2462dc9d63f2492acdc7e0fa72a4a
-
-# Zone name, eg: example.com
-CFZONE_NAME=tors.moe
-
-# Hostname to update, eg: homeserver.example.com
-CFRECORD_NAME=ycyxhk
-
-# Record type, A(IPv4)|AAAA(IPv6), default IPv4
-CFRECORD_TYPE=A
-
-# Cloudflare TTL for record, between 120 and 86400 seconds
-CFTTL=60
-
-# Ignore local file, update ip anyway
-FORCE=false
-
-WANIPSITE="http://ipv4.icanhazip.com"
-
-# Site to retrieve WAN ip, other examples are: bot.whatismyipaddress.com, https://api.ipify.org/ ...
-if [ "$CFRECORD_TYPE" = "A" ]; then
-  :
-elif [ "$CFRECORD_TYPE" = "AAAA" ]; then
-  WANIPSITE="http://ipv6.icanhazip.com"
-else
-  echo "$CFRECORD_TYPE specified is invalid, CFRECORD_TYPE can only be A(for IPv4)|AAAA(for IPv6)"
-  exit 2
-fi
-
-# get parameter
-while getopts k:h:z:t:f: opts; do
-  case ${opts} in
-    k) CFKEY=${OPTARG} ;;
-    h) CFRECORD_NAME=${OPTARG} ;;
-    z) CFZONE_NAME=${OPTARG} ;;
-    t) CFRECORD_TYPE=${OPTARG} ;;
-    f) FORCE=${OPTARG} ;;
-  esac
+# 解析命令行参数
+while getopts "k:d:s:t:h" opt; do
+    case $opt in
+        k) CF_API_TOKEN="$OPTARG" ;;
+        d) DOMAIN="$OPTARG" ;;
+        s) SUBDOMAIN="$OPTARG" ;;
+        t) RECORD_TYPE="$OPTARG" ;;
+        h) usage ;;
+        *) usage ;;
+    esac
 done
 
-# If required settings are missing just exit
-if [ "$CFKEY" = "" ]; then
-  echo "Missing api-key, get at: https://www.cloudflare.com/a/account/my-account"
-  echo "and save in ${0} or using the -k flag"
-  exit 2
-fi
-if [ "$CFRECORD_NAME" = "" ]; then 
-  echo "Missing hostname, what host do you want to update?"
-  echo "save in ${0} or using the -h flag"
-  exit 2
-fi
+# 检查必填参数
+[ -z "$CF_API_TOKEN" ] && echo "错误: -k API_TOKEN 不能为空" && usage
+[ -z "$DOMAIN" ] && echo "错误: -d DOMAIN 不能为空" && usage
+[ -z "$SUBDOMAIN" ] && echo "错误: -s SUBDOMAIN 不能为空" && usage
+[ -z "$RECORD_TYPE" ] && echo "错误: -t RECORD_TYPE 不能为空" && usage
 
-# If the hostname is not a FQDN
-if [ "$CFRECORD_NAME" != "$CFZONE_NAME" ] && ! [ -z "${CFRECORD_NAME##*$CFZONE_NAME}" ]; then
-  CFRECORD_NAME="$CFRECORD_NAME.$CFZONE_NAME"
-  echo " => Hostname is not a FQDN, assuming $CFRECORD_NAME"
-fi
+# 验证 RECORD_TYPE
+case "$RECORD_TYPE" in
+    A|AAAA) ;;
+    *) echo "错误: RECORD_TYPE 必须为 A 或 AAAA" && exit 1 ;;
+esac
 
-# Get current and old WAN ip
-WAN_IP=`curl -s ${WANIPSITE}`
-WAN_IP_FILE=$HOME/.cf-wan_ip_$CFRECORD_NAME.txt
-if [ -f $WAN_IP_FILE ]; then
-  OLD_WAN_IP=`cat $WAN_IP_FILE`
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "缺少命令: $1，尝试安装..."
+        install_pkg "$1" || exit 1
+    }
+}
+
+install_pkg() {
+    if [ -f /etc/debian_version ]; then
+        apt update -qq && apt install -y -qq "$1"
+    elif [ -f /etc/redhat-release ]; then
+        yum install -y "$1"
+    elif command -v opkg >/dev/null 2>&1; then
+        opkg update && opkg install "$1"
+    else
+        return 1
+    fi
+}
+
+get_dns_ip() {
+    local name="$1"
+    local type="$2"
+    
+    echo "正在查询DNS记录: $name ($type)" >&2
+    
+    if command -v dig >/dev/null 2>&1; then
+        local ip=$(dig +short "$name" "$type" | head -1)
+        if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
+            echo "通过dig获取到DNS IP: $ip" >&2
+            echo "$ip"
+            return
+        fi
+    fi
+    
+    if command -v nslookup >/dev/null 2>&1; then
+        local ip
+        if [ "$type" = "A" ]; then
+            ip=$(nslookup "$name" 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}')
+        else
+            ip=$(nslookup -type=AAAA "$name" 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}')
+        fi
+        if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
+            echo "通过nslookup获取到DNS IP: $ip" >&2
+            echo "$ip"
+            return
+        fi
+    fi
+    
+    echo "DNS查询失败，记录可能不存在" >&2
+    echo ""
+}
+
+need_cmd curl
+need_cmd jq
+
+case "$RECORD_TYPE" in
+    A)    IP_API_URL="https://v4.ipgg.cn/ip"; DNS_TYPE="A" ;;
+    AAAA) IP_API_URL="https://v6.ipgg.cn/ip"; DNS_TYPE="AAAA" ;;
+esac
+
+echo "正在获取当前出口IP..."
+CURRENT_IP=$(curl -s --max-time 10 "$IP_API_URL" | jq -r '.ip')
+[[ ! "$CURRENT_IP" =~ ^[0-9a-fA-F\.:]+$ ]] && echo "获取出口 IP 失败: $CURRENT_IP" && exit 1
+echo "当前出口IP: $CURRENT_IP"
+
+# 处理子域名，如果 SUBDOMAIN 为 @ 则直接使用域名
+if [ "$SUBDOMAIN" = "@" ]; then
+    record_name="$DOMAIN"
 else
-  echo "No file, need IP"
-  OLD_WAN_IP=""
+    record_name="$SUBDOMAIN.$DOMAIN"
 fi
 
-# If WAN IP is unchanged an not -f flag, exit here
-if [ "$WAN_IP" = "$OLD_WAN_IP" ] && [ "$FORCE" = false ]; then
-  echo "WAN IP Unchanged, to update anyway use flag -f true"
-  exit 0
-fi
+DNS_IP=$(get_dns_ip "$record_name" "$DNS_TYPE")
 
-# Get zone_identifier & record_identifier
-ID_FILE=$HOME/.cf-id_$CFRECORD_NAME.txt
-if [ -f $ID_FILE ] && [ $(wc -l $ID_FILE | cut -d " " -f 1) == 4 ] \
-  && [ "$(sed -n '3,1p' "$ID_FILE")" == "$CFZONE_NAME" ] \
-  && [ "$(sed -n '4,1p' "$ID_FILE")" == "$CFRECORD_NAME" ]; then
-    CFZONE_ID=$(sed -n '1,1p' "$ID_FILE")
-    CFRECORD_ID=$(sed -n '2,1p' "$ID_FILE")
+if [ -n "$DNS_IP" ]; then
+    if [ "$CURRENT_IP" == "$DNS_IP" ]; then
+        echo "出口 IP 与 DNS 一致，无需更新 ($CURRENT_IP)"
+        exit 0
+    else
+        echo "IP不一致，需要更新: DNS=$DNS_IP, 当前=$CURRENT_IP"
+    fi
 else
-    echo "Updating zone_identifier & record_identifier"
-    CFZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$CFZONE_NAME" -H "Authorization: Bearer $CFKEY" -H "Content-Type: application/json" | grep -Eo '"id":"[^"]*'|sed 's/"id":"//' | head -1 )
-    CFRECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?name=$CFRECORD_NAME" -H "Authorization: Bearer $CFKEY" -H "Content-Type: application/json"  | grep -Eo '"id":"[^"]*'|sed 's/"id":"//' | head -1 )
-    echo "$CFZONE_ID" > $ID_FILE
-    echo "$CFRECORD_ID" >> $ID_FILE
-    echo "$CFZONE_NAME" >> $ID_FILE
-    echo "$CFRECORD_NAME" >> $ID_FILE
+    echo "DNS记录不存在或查询失败，将创建新记录"
 fi
 
-# If WAN is changed, update cloudflare
-echo "Updating DNS to $WAN_IP"
+echo "正在获取Cloudflare Zone ID..."
+zone_json=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
+    -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
+ZONE_ID=$(echo "$zone_json" | jq -r '.result[0].id')
+[ -z "$ZONE_ID" ] || [ "$ZONE_ID" == "null" ] && echo "无法获取 Zone ID" && exit 1
+echo "Zone ID: $ZONE_ID"
 
-RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
-  -H "Authorization: Bearer $CFKEY" \
-  -H "Content-Type: application/json" \
-  --data "{\"id\":\"$CFZONE_ID\",\"type\":\"$CFRECORD_TYPE\",\"name\":\"$CFRECORD_NAME\",\"content\":\"$WAN_IP\", \"ttl\":$CFTTL}")
+echo "正在查询现有DNS记录..."
+record_json=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$record_name&type=$RECORD_TYPE" \
+    -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
+RECORD_ID=$(echo "$record_json" | jq -r '.result[0].id')
 
-if [ "$RESPONSE" != "${RESPONSE%success*}" ] && [ "$(echo $RESPONSE | grep "\"success\":true")" != "" ]; then
-  echo "Updated succesfuly!"
-  echo $WAN_IP > $WAN_IP_FILE
-  exit
+if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" == "null" ]; then
+    echo "记录不存在，创建中..."
+    response=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
+        -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
+        --data "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":600,\"proxied\":false}")
 else
-  echo 'Something went wrong :('
-  echo "Response: $RESPONSE"
-  exit 1
+    echo "记录存在，Record ID: $RECORD_ID，更新中..."
+    response=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
+        -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
+        --data "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":600,\"proxied\":false}")
 fi
+
+echo "$response" | grep -q '"success":true' && echo "更新成功: $record_name -> $CURRENT_IP" || {
+    echo "更新失败"
+    echo "$response"
+    exit 1
+}
